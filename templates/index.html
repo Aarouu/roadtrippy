@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Road Rating App</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <!-- Leaflet CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+    <style>
+        body { margin: 0; }
+        #map { height: 100vh; width: 100vw; }
+
+        .topbar {
+            position: absolute;
+            z-index: 1000;
+            top: 10px;
+            left: 10px;
+            background: white;
+            padding: 12px;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+
+        button { 
+            margin-top: 6px; 
+            cursor: pointer; 
+            padding: 6px 10px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="topbar">
+    <div>👤 Logged in as: <b>{{ session.username }}</b></div>
+    <button id="saveBtn">Save as Favorite</button>
+    <button onclick="window.location='/logout'">Logout</button>
+</div>
+
+<div id="map"></div>
+
+<script>
+let startMarker = null;
+let endMarker = null;
+let routeLine = null;
+let currentRouteCoords = null;
+let clickCount = 0;
+let favoriteLayers = [];
+
+//  MAP 
+var map = L.map('map', { worldCopyJump: true }).setView([60, 15], 4);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    minZoom: 2,
+    attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+
+var startIcon = L.icon({ 
+    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',
+    iconSize: [25, 41], 
+    iconAnchor: [12, 41] 
+});
+
+var endIcon = L.icon({ 
+    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
+    iconSize: [25, 41], 
+    iconAnchor: [12, 41] 
+});
+
+
+map.on("click", function(e) {
+
+    if (clickCount === 0) {
+        if (startMarker) map.removeLayer(startMarker);
+        if (routeLine) map.removeLayer(routeLine);
+
+        startMarker = L.marker(e.latlng, {icon: startIcon})
+            .addTo(map)
+            .bindPopup("Start")
+            .openPopup();
+
+        clickCount = 1;
+
+    } else {
+        if (endMarker) map.removeLayer(endMarker);
+
+        endMarker = L.marker(e.latlng, {icon: endIcon})
+            .addTo(map)
+            .bindPopup("End")
+            .openPopup();
+
+        fetch("/route", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+                start: [startMarker.getLatLng().lat, startMarker.getLatLng().lng],
+                end: [endMarker.getLatLng().lat, endMarker.getLatLng().lng]
+            })
+        })
+        .then(res => {
+            if (!res.ok) throw new Error("Routing failed");
+            return res.json();
+        })
+        .then(data => {
+
+            currentRouteCoords = data.coords;
+
+            if (routeLine) map.removeLayer(routeLine);
+
+            // Draw route in RED
+            routeLine = L.polyline(data.coords, {
+                color: "red",
+                weight: 6,
+                opacity: 0.9
+            }).addTo(map);
+
+            map.fitBounds(routeLine.getBounds());
+
+            // Show estimated time at route center
+            let midIndex = Math.floor(data.coords.length / 2);
+            let midLatLng = data.coords[midIndex];
+            L.popup()
+                .setLatLng(midLatLng)
+                .setContent(`🚗 Estimated time: ${data.time} min`)
+                .openOn(map);
+        })
+        .catch(err => {
+            alert("Route could not be calculated.");
+        });
+
+        clickCount = 0;
+    }
+});
+
+
+document.getElementById("saveBtn").onclick = function() {
+    if (!currentRouteCoords) {
+        alert("No route to save.");
+        return;
+    }
+
+    let name = prompt("Enter route name:");
+    if (!name) name = "Unnamed Road";
+
+    fetch("/save_favorite", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+            name: name,
+            coords: currentRouteCoords
+        })
+    })
+    .then(res => res.json())
+    .then(() => {
+        alert("Saved!");
+        loadFavorites();
+    });
+};
+
+
+function showRoute(coords, color="orange") {
+    if (routeLine) map.removeLayer(routeLine);
+
+    routeLine = L.polyline(coords, {
+        color: color,
+        weight: 6
+    }).addTo(map);
+
+    map.fitBounds(routeLine.getBounds());
+}
+
+
+function loadFavorites() {
+
+    favoriteLayers.forEach(layer => map.removeLayer(layer));
+    favoriteLayers = [];
+
+    fetch("/favorites")
+    .then(res => res.json())
+    .then(data => {
+        data.forEach(road => {
+
+            let midIndex = Math.floor(road.coords.length / 2);
+            let midLatLng = road.coords[midIndex];
+
+            let marker = L.marker(midLatLng).addTo(map);
+
+            marker.bindPopup(`
+                <b>${road.name}</b><br>
+                Avg rating: ${road.avg_rating || "No ratings"} (${road.rating_count})<br>
+                <button onclick='showRoute(${JSON.stringify(road.coords)})'>
+                    Show Full Route
+                </button><br>
+                Rate: ${[1,2,3,4,5].map(r => 
+                    `<button onclick='rateRoad(${road.id},${r})'>${r}</button>`
+                ).join(" ")}
+            `);
+
+            favoriteLayers.push(marker);
+        });
+    });
+}
+
+
+function rateRoad(roadId, rating) {
+    fetch("/rate", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({road_id: roadId, rating: rating})
+    })
+    .then(res => res.json())
+    .then(() => {
+        alert("Thanks for rating!");
+        loadFavorites();
+    });
+}
+
+
+loadFavorites();
+
+</script>
+
+</body>
+</html>
